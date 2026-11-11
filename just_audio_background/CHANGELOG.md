@@ -1,3 +1,7 @@
+## 0.0.1-beta.18
+
+* Fork (faa250AA): stop playback when the app is swiped away from recents (`onTaskRemoved`).
+
 ## 0.0.1-beta.17
 
 * Fix notification dismissal on player.stop (@rserro).

@@ -719,6 +719,13 @@ class _PlayerAudioHandler extends BaseAudioHandler
         await _platform.disposePlayer(DisposePlayerRequest(id: player.id));
       });
 
+  /// Fork: stop playback when the app is swiped away from recents (Android).
+  @override
+  Future<void> onTaskRemoved() async {
+    await stop();
+    await super.onTaskRemoved();
+  }
+
   Duration get currentPosition {
     if (_playing &&
         _justAudioEvent.processingState == ProcessingStateMessage.ready) {
