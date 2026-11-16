@@ -1,3 +1,7 @@
+## 0.0.1-beta.19
+
+* Fork (faa250AA): replace stop with forward/backward
+
 ## 0.0.1-beta.18
 
 * Fork (faa250AA): stop playback when the app is swiped away from recents (`onTaskRemoved`).

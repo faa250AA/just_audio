@@ -774,20 +774,29 @@ class _PlayerAudioHandler extends BaseAudioHandler
   void _broadcastState() {
     final controls = [
       if (hasPrevious) MediaControl.skipToPrevious,
+      MediaControl.rewind,
       if (_playing) MediaControl.pause else MediaControl.play,
-      MediaControl.stop,
+      MediaControl.fastForward,
       if (hasNext) MediaControl.skipToNext,
     ];
+    const compact = {
+      MediaAction.rewind,
+      MediaAction.play,
+      MediaAction.pause,
+      MediaAction.fastForward,
+    };
     playbackState.add(playbackState.nvalue!.copyWith(
       controls: controls,
       systemActions: {
         MediaAction.seek,
         MediaAction.seekForward,
         MediaAction.seekBackward,
+        MediaAction.stop,
       },
-      androidCompactActionIndices: List.generate(controls.length, (i) => i)
-          .where((i) => controls[i].action != MediaAction.stop)
-          .toList(),
+      androidCompactActionIndices: [
+        for (var i = 0; i < controls.length; i++)
+          if (compact.contains(controls[i].action)) i,
+      ],
       processingState: _justAudioEvent.errorCode != null
           ? AudioProcessingState.error
           : const {
