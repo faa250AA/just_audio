@@ -1,3 +1,7 @@
+## 0.0.1-beta.20
+
+* Fork (faa250AA): skip out-of-range shuffle indices instead of throwing `RangeError` while a playlist update is in flight (upstream #1574).
+
 ## 0.0.1-beta.19
 
 * Fork (faa250AA): replace stop with forward/backward

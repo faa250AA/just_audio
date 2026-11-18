@@ -1,3 +1,9 @@
+## 0.10.7
+
+* Fork (faa250AA): fix `ConcurrentModificationError` and a null check error when the playlist changes or the player is disposed while a load is in progress (upstream #1616).
+* Fork (faa250AA): pass a copy of the shuffle order to the platform, so a playlist insert can no longer desync it from the children (upstream #1574).
+* Fork (faa250AA): `play()` treats an audio session activation that throws as a failed activation, as documented, instead of throwing (upstream #1335).
+
 ## 0.10.6
 
 * Support AGP 9.
