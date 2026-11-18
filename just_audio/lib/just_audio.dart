@@ -1095,7 +1095,12 @@ class AudioPlayer {
     ));
     final playCompleter = Completer<dynamic>();
     final audioSession = await AudioSession.instance;
-    if (!_handleAudioSessionActivation || await audioSession.setActive(true)) {
+    // Activation can also throw, e.g. a PlatformException when iOS refuses it
+    // in the background while another app holds audio. Treat that as a
+    // failure to activate.
+    final activated = !_handleAudioSessionActivation ||
+        await audioSession.setActive(true).catchError((Object e) => false);
+    if (activated) {
       if (!playing) return;
       // TODO: rewrite this to more cleanly handle simultaneous load/play
       // requests which each may result in platform play requests.
@@ -2958,7 +2963,11 @@ class ConcatenatingAudioSource extends AudioSource {
   @override
   Future<void> _onLoad() async {
     await super._onLoad();
-    for (var source in children) {
+    // A snapshot: this loop holds no lock across its awaits, so any playlist
+    // edit or `AudioPlayer.dispose` may change `children` meanwhile.
+    for (var source in children.toList()) {
+      // Disposed: the sources are detached, and there is nothing to load for.
+      if (_player == null) return;
       await source._onLoad();
     }
   }
@@ -3211,7 +3220,7 @@ class ConcatenatingAudioSource extends AudioSource {
       id: _id,
       children: children.map((child) => child._toMessage()).toList(),
       useLazyPreparation: useLazyPreparation,
-      shuffleOrder: _shuffleOrder.indices);
+      shuffleOrder: List.of(_shuffleOrder.indices));
 }
 
 /// An [AudioSource] that clips the audio of a [UriAudioSource] between a

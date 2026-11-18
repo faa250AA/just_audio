@@ -1056,6 +1056,103 @@ void runTests() {
     await player2.dispose();
   });
 
+  test('_toMessage should copy shuffleOrder to prevent shared mutation',
+      () async {
+    final source = ConcatenatingAudioSource(
+      shuffleOrder: DefaultShuffleOrder(random: Random(1001)),
+      children: [
+        AudioSource.uri(Uri.parse("https://foo.foo/a.mp3"), tag: 'a'),
+        AudioSource.uri(Uri.parse("https://foo.foo/b.mp3"), tag: 'b'),
+        AudioSource.uri(Uri.parse("https://foo.foo/c.mp3"), tag: 'c'),
+      ],
+    );
+    final player = AudioPlayer();
+    await player.setAudioSource(source);
+    final msg = mock.mostRecentPlayer!.loadedPlaylist!.children.first
+        as ConcatenatingAudioSourceMessage;
+
+    expect(msg.children.length, equals(3));
+    expect(msg.shuffleOrder.length, equals(3));
+
+    await source.insert(
+        3, AudioSource.uri(Uri.parse("https://foo.foo/d.mp3"), tag: 'd'));
+
+    expect(msg.shuffleOrder.length, equals(3),
+        reason: 'shuffleOrder should be a defensive copy, not mutated by insert');
+    expect(msg.children.length, equals(3));
+    expect(msg.shuffleOrder.length, equals(msg.children.length),
+        reason: 'shuffleOrder and children should stay in sync');
+
+    await player.dispose();
+  });
+
+  test(
+      'desync\'d shuffleOrder causes RangeError in shuffleIndices computation',
+      () {
+    final shuffleOrder = <int>[2, 0, 1];
+    final msg = ConcatenatingAudioSourceMessage(
+      id: 'test-cat',
+      children: [
+        ProgressiveAudioSourceMessage(
+            id: 'a', uri: 'https://foo/a.mp3', headers: null, tag: null),
+        ProgressiveAudioSourceMessage(
+            id: 'b', uri: 'https://foo/b.mp3', headers: null, tag: null),
+        ProgressiveAudioSourceMessage(
+            id: 'c', uri: 'https://foo/c.mp3', headers: null, tag: null),
+      ],
+      useLazyPreparation: true,
+      shuffleOrder: shuffleOrder,
+    );
+
+    expect(computeShuffleIndices(msg), equals([2, 0, 1]));
+
+    shuffleOrder.add(3);
+
+    expect(
+      () => computeShuffleIndices(msg),
+      throwsA(isA<RangeError>()),
+      reason:
+          'shuffleOrder references index 3 but children has only 3 entries',
+    );
+  });
+
+  test('insert should not cause shuffleOrder desync during async gap',
+      () async {
+    final source = ConcatenatingAudioSource(
+      shuffleOrder: DefaultShuffleOrder(random: Random(1001)),
+      children: [
+        AudioSource.uri(Uri.parse("https://foo.foo/a.mp3"), tag: 'a'),
+        AudioSource.uri(Uri.parse("https://foo.foo/b.mp3"), tag: 'b'),
+        AudioSource.uri(Uri.parse("https://foo.foo/c.mp3"), tag: 'c'),
+      ],
+    );
+    final player = AudioPlayer();
+    await player.setAudioSource(source);
+    final msg = mock.mostRecentPlayer!.loadedPlaylist!.children.first
+        as ConcatenatingAudioSourceMessage;
+    mock.mostRecentPlayer!.blockInsert();
+
+    final insertFuture = source.insert(
+        3, AudioSource.uri(Uri.parse("https://foo.foo/d.mp3"), tag: 'd'));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(msg.shuffleOrder.length, equals(3),
+        reason:
+            'shuffleOrder should not be mutated — message holds a defensive copy');
+    expect(msg.shuffleOrder.length, equals(msg.children.length),
+        reason: 'shuffleOrder and children should stay in sync');
+    expect(
+      () => computeShuffleIndices(msg),
+      returnsNormally,
+      reason: 'no desync means no RangeError',
+    );
+
+    mock.mostRecentPlayer!.unblockInsert();
+    await insertFuture;
+    await player.dispose();
+  });
+
+
   test('seekToIndex', () async {
     final source = ConcatenatingAudioSource(
       shuffleOrder: DefaultShuffleOrder(random: Random(1001)),
@@ -1716,7 +1813,126 @@ void runTests() {
     expect(player.shuffleModeEnabled, equals(true));
     await player.dispose();
   });
+
+  group('playlist changes during load', () {
+    const pathProviderChannel =
+        MethodChannel('plugins.flutter.io/path_provider');
+    late Directory tempDir;
+    late Completer<void> assetLoad;
+    late int temporaryDirectoryCalls;
+
+    Future<void> until(bool Function() done) async {
+      for (var i = 0; i < 1000 && !done(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+      expect(done(), isTrue);
+    }
+
+    // Starts loading [sources] and returns the load's outcome. The first asset
+    // is held open by the second call, since a new player asks once for itself.
+    Future<Object?> Function() loadHeld(
+        AudioPlayer player, List<AudioSource> sources) {
+      Object? error;
+      final load = player
+          .setAudioSources(sources)
+          .then<void>((_) {}, onError: (Object e) => error = e);
+      return () async {
+        await load;
+        return error;
+      };
+    }
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync('just_audio_test');
+      File('${tempDir.path}/just_audio_cache/assets/audio/foo.mp3')
+          .createSync(recursive: true);
+      assetLoad = Completer();
+      temporaryDirectoryCalls = 0;
+      _ambiguate(TestDefaultBinaryMessengerBinding.instance)!
+          .defaultBinaryMessenger
+          .setMockMethodCallHandler(pathProviderChannel, (methodCall) async {
+        temporaryDirectoryCalls++;
+        await assetLoad.future;
+        return tempDir.path;
+      });
+    });
+
+    tearDown(() {
+      _ambiguate(TestDefaultBinaryMessengerBinding.instance)!
+          .defaultBinaryMessenger
+          .setMockMethodCallHandler(pathProviderChannel, null);
+      tempDir.deleteSync(recursive: true);
+    });
+
+    Future<Object?> disposeDuringLoad(List<AudioSource> sources) async {
+      final player = AudioPlayer();
+      final result = loadHeld(player, sources);
+      await until(() => temporaryDirectoryCalls == 2);
+      final disposing = player.dispose();
+      await until(() => player.audioSources.isEmpty);
+      assetLoad.complete();
+      await disposing;
+      return result();
+    }
+
+    test('dispose interrupts the load and later sources stay unloaded',
+        () async {
+      final error = await disposeDuringLoad(
+          [for (var i = 0; i < 3; i++) AudioSource.asset('audio/foo.mp3')]);
+      expect(error, isA<PlayerInterruptedException>());
+      expect(temporaryDirectoryCalls, equals(2));
+    });
+
+    test('dispose interrupts the load of a remote source after an asset',
+        () async {
+      final error = await disposeDuringLoad([
+        AudioSource.asset('audio/foo.mp3'),
+        AudioSource.uri(Uri.parse('https://foo.foo/foo.mp3')),
+      ]);
+      expect(error, isA<PlayerInterruptedException>());
+    });
+
+    test('a playlist of another length interrupts the load in flight',
+        () async {
+      final player = AudioPlayer();
+      final result = loadHeld(player, [AudioSource.asset('audio/foo.mp3')]);
+      await until(() => temporaryDirectoryCalls == 2);
+      final next = player.setAudioSources([
+        for (final name in ['a', 'b', 'c'])
+          AudioSource.uri(Uri.parse('https://foo.foo/$name.mp3')),
+      ]);
+      await until(() => player.audioSources.length == 3);
+      assetLoad.complete();
+      expect(await next, equals(audioSourceDuration));
+      expect(await result(), isA<PlayerInterruptedException>());
+      await player.dispose();
+    });
+  });
 }
+
+/// Replicates the shuffleIndices algorithm from
+/// AudioSourceExtension in just_audio_background (L891-906).
+List<int> computeShuffleIndices(ConcatenatingAudioSourceMessage msg) {
+  var offset = 0;
+  final childIndicesList = <List<int>>[];
+  for (final child in msg.children) {
+    if (child is ConcatenatingAudioSourceMessage) {
+      final childIndices =
+          computeShuffleIndices(child).map((i) => i + offset).toList();
+      childIndicesList.add(childIndices);
+      offset += childIndices.length;
+    } else {
+      childIndicesList.add([offset]);
+      offset += 1;
+    }
+  }
+  final indices = <int>[];
+  for (final index in msg.shuffleOrder) {
+    indices.addAll(childIndicesList[index]);
+  }
+  return indices;
+}
+
 
 class MockJustAudio extends Mock
     with MockPlatformInterfaceMixin
@@ -1808,6 +2024,8 @@ class MockAudioPlayer extends AudioPlayerPlatform {
   int? _errorCode;
   String? _errorMessage;
   Completer<void>? _loadBlock;
+  ConcatenatingAudioSourceMessage? loadedPlaylist;
+  Completer<void>? _insertBlock;
 
   MockAudioPlayer(InitRequest request)
       : audioLoadConfiguration = request.audioLoadConfiguration,
@@ -1832,6 +2050,15 @@ class MockAudioPlayer extends AudioPlayerPlatform {
   void unblockLoad() {
     _loadBlock?.complete();
     _loadBlock = null;
+  }
+
+  void blockInsert() {
+    _insertBlock ??= Completer();
+  }
+
+  void unblockInsert() {
+    _insertBlock?.complete();
+    _insertBlock = null;
   }
 
   Future<void> _loadReady() async {
@@ -1859,6 +2086,7 @@ class MockAudioPlayer extends AudioPlayerPlatform {
     final loadRequest = _loadRequest = MockLoadRequest();
     final playlist =
         request.audioSourceMessage as ConcatenatingAudioSourceMessage;
+    loadedPlaylist = playlist;
     if (playlist.children.isEmpty) return LoadResponse(duration: null);
     final audioSource = playlist.children.first;
     _processingState = ProcessingStateMessage.loading;
@@ -2018,7 +2246,9 @@ class MockAudioPlayer extends AudioPlayerPlatform {
   @override
   Future<ConcatenatingInsertAllResponse> concatenatingInsertAll(
       ConcatenatingInsertAllRequest request) async {
-    // TODO
+    if (_insertBlock != null) {
+      await _insertBlock!.future;
+    }
     return ConcatenatingInsertAllResponse();
   }
 
